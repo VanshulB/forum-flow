@@ -1,23 +1,31 @@
 import {
-  Arg,
-  Ctx,
-  Field,
-  InputType,
-  Mutation,
-  ObjectType,
   Resolver,
+  Mutation,
+  Arg,
+  InputType,
+  Field,
+  Ctx,
+  ObjectType,
+  Query,
 } from "type-graphql";
-import argon2 from "argon2";
-import { MyContext } from "types";
+import { MyContext } from "../types";
 import { User } from "../entities/User";
+import argon2 from "argon2";
 
 @InputType()
-class UsernameAndPassword {
+class UsernamePasswordInput {
   @Field()
   username: string;
-
   @Field()
   password: string;
+}
+
+@ObjectType()
+class FieldError {
+  @Field()
+  field: string;
+  @Field()
+  message: string;
 }
 
 @ObjectType()
@@ -29,56 +37,57 @@ class UserResponse {
   user?: User;
 }
 
-@ObjectType()
-class FieldError {
-  @Field()
-  field: string;
-
-  @Field()
-  message: string;
-}
-
 @Resolver()
 export class UserResolver {
+  @Query(() => User, { nullable: true })
+  async me(@Ctx() { req, em }: MyContext) {
+    // you are not logged in
+    if (!req.session.userId) {
+      return null;
+    }
+
+    const user = await em.findOne(User, { id: req.session.userId });
+    return user;
+  }
+
   @Mutation(() => UserResponse)
   async register(
-    @Arg("input") { username, password }: UsernameAndPassword,
-    @Ctx() { em }: MyContext
+    @Arg("options") options: UsernamePasswordInput,
+    @Ctx() { em, req }: MyContext
   ): Promise<UserResponse> {
-    if (username.length <= 3) {
+    if (options.username.length <= 2) {
       return {
         errors: [
           {
             field: "username",
-            message: "length of username too short",
+            message: "length must be greater than 2",
           },
         ],
       };
     }
-    if (password.length <= 2) {
+
+    if (options.password.length <= 2) {
       return {
         errors: [
           {
             field: "password",
-            message: "password is too short",
+            message: "length must be greater than 2",
           },
         ],
       };
     }
-    const hashedPassword = await argon2.hash(password);
+
+    const hashedPassword = await argon2.hash(options.password);
     const user = em.create(User, {
-      username,
-      createdAt: "",
-      updatedAt: "",
+      username: options.username,
       password: hashedPassword,
     });
     try {
       await em.persistAndFlush(user);
-    } catch (error) {
-      // duplicate username registration error handling
-
-      if (error.code === "23505") {
-        // || error.detail.includes("already exists")) {
+    } catch (err) {
+      //|| err.detail.includes("already exists")) {
+      // duplicate username error
+      if (err.code === "23505") {
         return {
           errors: [
             {
@@ -88,41 +97,46 @@ export class UserResolver {
           ],
         };
       }
-      console.log("message:", error.code);
     }
-    return {
-      user,
-    };
+
+    // store user id session
+    // this will set a cookie on the user
+    // keep them logged in
+    req.session.userId = user.id;
+
+    return { user };
   }
 
   @Mutation(() => UserResponse)
   async login(
-    @Arg("input") { username, password }: UsernameAndPassword,
-    @Ctx() { em }: MyContext
+    @Arg("options") options: UsernamePasswordInput,
+    @Ctx() { em, req }: MyContext
   ): Promise<UserResponse> {
-    const user = await em.findOne(User, { username });
+    const user = await em.findOne(User, { username: options.username });
     if (!user) {
       return {
         errors: [
           {
             field: "username",
-            message: "username dosen't exist",
+            message: "that username doesn't exist",
           },
         ],
       };
     }
-
-    const valid = await argon2.verify(user.password, password);
+    const valid = await argon2.verify(user.password, options.password);
     if (!valid) {
       return {
         errors: [
           {
             field: "password",
-            message: "invalid password",
+            message: "incorrect password",
           },
         ],
       };
     }
+
+    req.session.userId = user.id;
+
     return {
       user,
     };
